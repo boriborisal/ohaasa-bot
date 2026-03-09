@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 class OhaasaBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.message_content = True
+        # Message content intent not needed for slash commands only
 
         super().__init__(
             command_prefix='!',  # Fallback prefix (not used for slash commands)
@@ -49,9 +49,9 @@ class OhaasaBot(commands.Bot):
     async def on_ready(self):
         """Called when bot is ready"""
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
-        print(f"✅ {self.user.name} 봇이 온라인 상태입니다!")
-        print(f"   서버 수: {len(self.guilds)}")
-        print(f"   사용자 수: {len(set(self.get_all_members()))}")
+        print(f"[SUCCESS] {self.user.name} bot is online!")
+        print(f"   Servers: {len(self.guilds)}")
+        print(f"   Users: {len(set(self.get_all_members()))}")
 
 
 # Initialize bot
@@ -293,7 +293,7 @@ async def main():
     """Main entry point"""
     if not DISCORD_TOKEN:
         logger.error("DISCORD_TOKEN is not set in .env file")
-        print("❌ Error: DISCORD_TOKEN is not set in .env file")
+        print("[ERROR] DISCORD_TOKEN is not set in .env file")
         print("Please create a .env file with your Discord bot token")
         return
 
@@ -302,10 +302,10 @@ async def main():
             await bot.start(DISCORD_TOKEN)
     except discord.LoginFailure:
         logger.error("Invalid Discord token")
-        print("❌ Error: Invalid Discord token")
+        print("[ERROR] Invalid Discord token")
     except Exception as e:
         logger.error(f"Error starting bot: {e}")
-        print(f"❌ Error starting bot: {e}")
+        print(f"[ERROR] Error starting bot: {e}")
 
 
 if __name__ == "__main__":

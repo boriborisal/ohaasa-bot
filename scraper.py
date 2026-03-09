@@ -1,21 +1,39 @@
 """
 Web scraper module for Oha-asa horoscope page
-Scrapes daily horoscope data from https://www.asahi.co.jp/ohaasa/week/horoscope/index.html
+Fetches daily horoscope data from JSON API
+API: https://www.asahi.co.jp/data/ohaasa2020/horoscope.json
 """
 import logging
 import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 import requests
-from bs4 import BeautifulSoup
-import chardet
 
-from config import OHAASA_URL, ZODIAC_MAPPING, CACHE_DURATION
+from config import ZODIAC_MAPPING, CACHE_DURATION
 from translator import translate_to_korean_async
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# JSON API URL (actual data source)
+OHAASA_JSON_URL = 'https://www.asahi.co.jp/data/ohaasa2020/horoscope.json'
+
+# Zodiac sign code mapping (from JSON "horoscope_st" field)
+ZODIAC_CODE_MAPPING = {
+    '01': '牡羊座',
+    '02': '牡牛座',
+    '03': '双子座',
+    '04': '蟹座',
+    '05': '獅子座',
+    '06': '乙女座',
+    '07': '天秤座',
+    '08': '蠍座',
+    '09': '射手座',
+    '10': '山羊座',
+    '11': '水瓶座',
+    '12': '魚座'
+}
 
 # Cache storage
 _horoscope_cache: Optional[Dict[str, str]] = None
@@ -28,25 +46,9 @@ MAX_FAILURES = 3
 CIRCUIT_BREAKER_TIMEOUT = 300  # 5 minutes
 
 
-def detect_encoding(content: bytes) -> str:
-    """
-    Detect the encoding of HTML content
-
-    Args:
-        content: Raw HTML content as bytes
-
-    Returns:
-        Detected encoding (e.g., 'utf-8', 'shift_jis')
-    """
-    result = chardet.detect(content)
-    encoding = result['encoding']
-    logger.info(f"Detected encoding: {encoding} (confidence: {result['confidence']})")
-    return encoding or 'utf-8'
-
-
 def scrape_horoscope() -> Dict[str, Dict[str, str]]:
     """
-    Scrape horoscope data from the Oha-asa website
+    Fetch horoscope data from the Oha-asa JSON API
 
     Returns:
         Dictionary mapping Japanese zodiac names to horoscope data
@@ -56,121 +58,69 @@ def scrape_horoscope() -> Dict[str, Dict[str, str]]:
         }
 
     Raises:
-        Exception: If scraping fails
+        Exception: If fetching fails
     """
     try:
-        logger.info(f"Scraping horoscope from {OHAASA_URL}")
+        logger.info(f"Fetching horoscope from JSON API: {OHAASA_JSON_URL}")
 
-        # Fetch the page with proper headers
+        # Fetch JSON data
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
-        response = requests.get(OHAASA_URL, headers=headers, timeout=10)
+        response = requests.get(OHAASA_JSON_URL, headers=headers, timeout=10)
         response.raise_for_status()
 
-        # Detect encoding and decode content
-        encoding = detect_encoding(response.content)
-        html_content = response.content.decode(encoding, errors='ignore')
+        # Parse JSON
+        data = response.json()
 
-        # Parse HTML with BeautifulSoup
-        soup = BeautifulSoup(html_content, 'lxml')
+        if not data or len(data) == 0:
+            raise Exception("Empty JSON response")
+
+        # Get today's horoscope data (first item in array)
+        today_data = data[0]
+        horoscope_details = today_data.get('detail', [])
+
+        if not horoscope_details:
+            raise Exception("No horoscope details found in JSON")
 
         horoscopes = {}
 
-        # Find horoscope data - the structure may vary, so we'll try multiple approaches
-        # Approach 1: Look for zodiac signs in specific elements
-        for jp_sign, kr_sign in ZODIAC_MAPPING.items():
-            # Try to find elements containing the zodiac sign
-            sign_elements = soup.find_all(string=lambda text: text and jp_sign in text)
+        # Parse each zodiac entry
+        for detail in horoscope_details:
+            zodiac_code = detail.get('horoscope_st', '')
+            ranking = detail.get('ranking_no', 'N/A')
+            horoscope_text = detail.get('horoscope_text', '')
 
-            if sign_elements:
-                # Try to extract horoscope info from nearby elements
-                for elem in sign_elements:
-                    parent = elem.parent
+            # Map zodiac code to Japanese name
+            jp_sign = ZODIAC_CODE_MAPPING.get(zodiac_code)
 
-                    # Navigate to find the horoscope description
-                    # This is a generic approach - actual structure may vary
-                    description = ""
-                    rank = ""
-                    lucky_item = ""
+            if not jp_sign:
+                logger.warning(f"Unknown zodiac code: {zodiac_code}")
+                continue
 
-                    # Try to find description in siblings or parent siblings
-                    if parent:
-                        # Look for text in parent and siblings
-                        text_content = parent.get_text(strip=True)
+            # Parse horoscope text (tab-separated fields)
+            # Format: main_fortune\tadvice1\tadvice2\tlucky_action
+            text_parts = horoscope_text.split('\t')
 
-                        # Store horoscope data
-                        if text_content and len(text_content) > len(jp_sign):
-                            description = text_content.replace(jp_sign, '').strip()
+            # Combine all parts into description
+            description = '\n'.join([part.strip() for part in text_parts if part.strip()])
 
-                    if description:
-                        horoscopes[jp_sign] = {
-                            'rank': rank or 'N/A',
-                            'description': description,
-                            'lucky_item': lucky_item or 'N/A'
-                        }
-                        break
+            horoscopes[jp_sign] = {
+                'rank': str(ranking),
+                'description': description,
+                'lucky_item': 'N/A'  # Not separately provided in this format
+            }
 
-        # If the above approach didn't work, try finding by table or list structure
-        if not horoscopes:
-            # Look for tables containing horoscope data
-            tables = soup.find_all('table')
-            for table in tables:
-                rows = table.find_all('tr')
-                for row in rows:
-                    cells = row.find_all(['td', 'th'])
-                    row_text = ' '.join([cell.get_text(strip=True) for cell in cells])
-
-                    for jp_sign in ZODIAC_MAPPING.keys():
-                        if jp_sign in row_text:
-                            description = row_text.replace(jp_sign, '').strip()
-                            if description:
-                                horoscopes[jp_sign] = {
-                                    'rank': 'N/A',
-                                    'description': description,
-                                    'lucky_item': 'N/A'
-                                }
-
-        # If still no data, look for any divs or sections
-        if not horoscopes:
-            # Try to find content by common class names or structures
-            sections = soup.find_all(['div', 'section', 'article'])
-            for section in sections:
-                text = section.get_text(strip=True)
-                for jp_sign in ZODIAC_MAPPING.keys():
-                    if jp_sign in text:
-                        # Extract the relevant portion
-                        start_idx = text.find(jp_sign)
-                        # Get text after the sign name (next ~200 characters)
-                        description = text[start_idx + len(jp_sign):start_idx + len(jp_sign) + 200].strip()
-
-                        if description and jp_sign not in horoscopes:
-                            horoscopes[jp_sign] = {
-                                'rank': 'N/A',
-                                'description': description,
-                                'lucky_item': 'N/A'
-                            }
-
-        if not horoscopes:
-            logger.warning("No horoscope data found. The website structure may have changed.")
-            # Create dummy data for testing purposes
-            for jp_sign in ZODIAC_MAPPING.keys():
-                horoscopes[jp_sign] = {
-                    'rank': 'N/A',
-                    'description': '今日も素敵な一日になりますように！',
-                    'lucky_item': 'N/A'
-                }
-
-        logger.info(f"Successfully scraped {len(horoscopes)} horoscopes")
+        logger.info(f"Successfully fetched {len(horoscopes)} horoscopes from JSON API")
         return horoscopes
 
     except requests.RequestException as e:
-        logger.error(f"Network error while scraping: {type(e).__name__}")
+        logger.error(f"Network error while fetching JSON: {type(e).__name__}")
         # Security: Don't expose internal error details
         raise Exception("ネットワークエラーが発生しました")
     except Exception as e:
-        logger.error(f"Error scraping horoscope: {type(e).__name__}")
-        raise Exception("スクレイピングエラーが発生しました")
+        logger.error(f"Error fetching horoscope: {type(e).__name__}: {str(e)[:100]}")
+        raise Exception("データ取得エラーが発生しました")
 
 
 async def scrape_horoscope_async() -> Dict[str, Dict[str, str]]:
